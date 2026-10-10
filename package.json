@@ -1,0 +1,33 @@
+{
+  "name": "storelint-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hosted web app for StoreLint: free zip scans, shareable reports, and the ship-it-for-me service page.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "dev": "tsc -p tsconfig.json && DATA_DIR=./data node dist/src/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.4",
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.13.13",
+    "yauzl": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.5",
+    "@types/yauzl": "^3.4.0",
+    "typescript": "^5.9.0"
+  },
+  "optionalDependencies": {
+    "storelint": "github:iddriss/storelint"
+  },
+  "packageManager": "pnpm@10.28.2"
+}
