@@ -52,7 +52,7 @@ export async function stubScan(projectPath: string): Promise<Report> {
       title: 'The StoreLint scanner is not available on this server yet',
       detail:
         'This deployment could not load the storelint package, so no store-readiness checks were run on your upload.',
-      fix: 'Run the scanner locally with `npx github:iddriss/storelint` in your project directory, or try the web scan again later.',
+      fix: 'Run the scanner locally with `npx @iraaj/storelint` in your project directory, or try the web scan again later.',
       docs: 'https://github.com/iddriss/storelint',
     },
   ];
