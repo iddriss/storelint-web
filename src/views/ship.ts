@@ -11,7 +11,7 @@ export interface ShipViewOptions {
   errors?: Partial<Record<keyof LeadFormValues, string>>;
 }
 
-interface Tier {
+export interface Tier {
   key: 'play' | 'ios' | 'both' | 'fix';
   name: string;
   price: string;
@@ -19,19 +19,31 @@ interface Tier {
   featured?: boolean;
 }
 
-const TIERS: Tier[] = [
+export const TIERS: Tier[] = [
   { key: 'play', name: 'Google Play', price: '$149', blurb: 'Android release to production on Play, including the Data Safety and content-rating forms.' },
   { key: 'ios', name: 'App Store', price: '$199', blurb: 'iOS release through App Store Connect, including privacy manifest, usage strings and review notes.' },
   { key: 'both', name: 'Both stores', price: '$299', blurb: 'Android and iOS together. One handover, one invoice.', featured: true },
   { key: 'fix', name: 'Fix a rejection', price: '$99', blurb: 'Already rejected? Send the review message. We fix the cause and resubmit.' },
 ];
 
-function tierButton(t: Tier, links: PayLinks): string {
+export function tierButton(t: Tier, links: PayLinks): string {
+  const cls = t.featured ? 'btn btn-primary' : 'btn btn-secondary';
   const pay = links[t.key];
-  if (pay) {
-    return `<a class="btn ${t.featured ? 'btn-primary' : 'btn-ghost'}" href="${esc(pay)}" rel="noopener">Pay ${esc(t.price)} &amp; start</a>`;
-  }
-  return `<a class="btn ${t.featured ? 'btn-primary' : 'btn-ghost'}" href="/ship?plan=${t.key}#lead">Request this</a>`;
+  if (pay) return `<a class="${cls}" href="${esc(pay)}" rel="noopener">Pay ${esc(t.price)} &amp; start</a>`;
+  return `<a class="${cls}" href="/ship?plan=${t.key}#lead">Request this</a>`;
+}
+
+export function renderTierCards(links: PayLinks): string {
+  return `<div class="grid grid-4">
+${TIERS.map(
+  (t) => `  <div class="card price-card${t.featured ? ' price-featured' : ''}">
+    <h3>${esc(t.name)}</h3>
+    <p class="price">${esc(t.price)}</p>
+    <p>${esc(t.blurb)}</p>
+    ${tierButton(t, links)}
+  </div>`,
+).join('\n')}
+</div>`;
 }
 
 function field(
@@ -45,7 +57,7 @@ function field(
   return `<div class="field${err ? ' field-error' : ''}">
   <label for="lead-${name}">${label}</label>
   ${control}
-  ${err ? `<p class="error-text" id="lead-${name}-error">${esc(err)}</p>` : hint ? `<p class="muted small">${hint}</p>` : ''}
+  ${err ? `<p class="error-text" id="lead-${name}-error">${esc(err)}</p>` : hint ? `<p class="hint">${hint}</p>` : ''}
 </div>`;
 }
 
@@ -62,45 +74,48 @@ export function renderShip(o: ShipViewOptions): string {
   const options = PLATFORMS.filter((p) => p !== 'deepscan')
     .map((p) => `<option value="${p}"${v.platform === p ? ' selected' : ''}>${esc(PLATFORM_LABELS[p])}</option>`)
     .join('');
+  const anyPayLink = Object.values(o.payLinks).some(Boolean);
 
   const body = `
 <section class="hero hero-sm">
-  <div class="container">
-    <p class="eyebrow">Done-for-you release</p>
-    <h1>We ship it for you.</h1>
-    <p class="lead">Send us the repo. We fix every ${SITE_NAME} finding, set up signing, listings and compliance forms, and submit to the stores. 48-hour turnaround from the moment we have access, fixed price, no retainer.</p>
+  <div class="hero-grid" aria-hidden="true"></div>
+  <div class="container hero-inner">
+    <p class="eyebrow" data-rise style="--d:90ms">Ship it for me</p>
+    <h1 data-rise style="--d:180ms">We ship it for you.<span class="line2">Fixed price. 48-hour turnaround.</span></h1>
+    <p class="hero-sub" data-rise style="--d:300ms">Send us the repo. We fix every ${esc(SITE_NAME)} finding, set up signing, listings and compliance forms, and submit to the stores. No retainer.</p>
+    <div class="hero-actions" data-rise style="--d:400ms">
+      <a class="btn btn-primary btn-lg" href="#lead">Request a package</a>
+      <a class="text-link" href="#included">What&rsquo;s included <svg class="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+    </div>
   </div>
 </section>
 
 <section class="section" id="prices">
   <div class="container">
-    <h2>Pick a package</h2>
-    <div class="grid-4 pricing">
-      ${TIERS.map(
-        (t) => `<div class="card price-card${t.featured ? ' price-featured' : ''}">
-        <h3>${esc(t.name)}</h3>
-        <p class="price">${esc(t.price)}</p>
-        <p>${esc(t.blurb)}</p>
-        ${tierButton(t, o.payLinks)}
-      </div>`,
-      ).join('\n')}
+    <div class="section-head tight">
+      <span class="eyebrow">Packages</span>
+      <h2>Pick a package.</h2>
+      <p class="lead">${
+        anyPayLink
+          ? 'Pay to start right away, or use the form below if you want to talk first. We reply within one business day.'
+          : 'Payment is collected after we confirm scope. Request a package and we reply within one business day.'
+      }</p>
     </div>
-    ${
-      Object.values(o.payLinks).some(Boolean)
-        ? '<p class="muted small">Prefer to talk first? Use the form below and we reply within one business day.</p>'
-        : '<p class="muted small">Payment is collected after we confirm scope. Request a package below and we reply within one business day.</p>'
-    }
+    ${renderTierCards(o.payLinks)}
   </div>
 </section>
 
-<section class="section section-alt" id="included">
+<section class="section" id="included">
   <div class="container">
-    <h2>What&rsquo;s included</h2>
-    <div class="grid-3">
+    <div class="section-head">
+      <span class="eyebrow">What&rsquo;s included</span>
+      <h2>Everything between the repo and the store listing.</h2>
+    </div>
+    <div class="grid grid-3">
       <div class="card">
         <h3>Fix every finding</h3>
-        <ul class="check-list">
-          <li>SDK targets, 16 KB page-size, Play Billing and Play Core updates</li>
+        <ul class="tick-list">
+          <li>SDK targets, 16 KB page size, Play Billing and Play Core updates</li>
           <li>Privacy manifest, usage descriptions, ATS and entitlements</li>
           <li>Release signing set up properly, keystore and secrets out of the repo</li>
           <li>Icons, launch screen, bundle ids and version numbers</li>
@@ -108,20 +123,20 @@ export function renderShip(o: ShipViewOptions): string {
       </div>
       <div class="card">
         <h3>Store setup</h3>
-        <ul class="check-list">
+        <ul class="tick-list">
           <li>Play Console: Data Safety, content rating, target audience, testers</li>
-          <li>App Store Connect: privacy nutrition labels, export compliance, review notes</li>
+          <li>App Store Connect: privacy labels, export compliance, review notes</li>
           <li>Screenshots and listing copy if you have the assets</li>
-          <li>Submission, and we babysit the review</li>
+          <li>Submission, and we watch the review until it is through</li>
         </ul>
       </div>
       <div class="card">
         <h3>48-hour turnaround</h3>
-        <ul class="check-list">
+        <ul class="tick-list">
           <li>Starts when we have repo and console access</li>
-          <li>Every change lands as a reviewed pull request</li>
-          <li>Written handover: what changed and why, how to release next time</li>
-          <li>Rejection within 30 days of our submission? We fix it free.</li>
+          <li>Every change lands as a reviewable pull request</li>
+          <li>Written handover: what changed, why, and how to release next time</li>
+          <li>Rejected within 30 days of our submission? We fix it free.</li>
         </ul>
       </div>
     </div>
@@ -130,9 +145,12 @@ export function renderShip(o: ShipViewOptions): string {
 
 <section class="section" id="lead">
   <div class="container narrow">
-    <h2>Request a package</h2>
-    <p class="lead">No payment now. Tell us about the app and we come back within one business day with a confirmed scope.</p>
-    <form class="lead-form" method="post" action="/ship#lead" data-busy="Sending…" novalidate>
+    <div class="section-head tight">
+      <span class="eyebrow">Request</span>
+      <h2>Tell us about the app.</h2>
+      <p class="lead">No payment now. We come back within one business day with a confirmed scope.</p>
+    </div>
+    <form class="form-card" method="post" action="/ship#lead" data-busy="Sending…" novalidate>
       <input type="text" name="website" class="hp" tabindex="-1" autocomplete="off" aria-hidden="true">
       ${field('name', 'Your name', `<input id="lead-name" name="name" type="text" required maxlength="120" autocomplete="name" value="${esc(v.name)}">`, errors)}
       ${field('email', 'Email', `<input id="lead-email" name="email" type="email" required maxlength="254" autocomplete="email" value="${esc(v.email)}">`, errors)}
@@ -149,16 +167,18 @@ export function renderShip(o: ShipViewOptions): string {
         'Repository URL',
         `<input id="lead-repo_url" name="repo_url" type="url" maxlength="500" placeholder="https://github.com/you/app" value="${esc(v.repo_url)}">`,
         errors,
-        'Optional. We will ask for read access after we confirm scope.',
+        'Optional. We ask for read access after we confirm scope.',
       )}
       ${field(
         'message',
         'Anything else',
-        `<textarea id="lead-message" name="message" rows="5" maxlength="5000" placeholder="Framework, deadline, the rejection message if you have one, link to a StoreLint report…">${esc(v.message)}</textarea>`,
+        `<textarea id="lead-message" name="message" rows="5" maxlength="5000" placeholder="Framework, deadline, the rejection message if you have one, a StoreLint report link…">${esc(v.message)}</textarea>`,
         errors,
       )}
-      <button type="submit" class="btn btn-primary btn-lg">Send request</button>
-      <p class="muted small">We only use this to reply about your release. No newsletter.</p>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-lg">Send request</button>
+        <span class="small dim">Only used to reply about your release. No newsletter.</span>
+      </div>
     </form>
   </div>
 </section>`;
@@ -174,15 +194,15 @@ export function renderShip(o: ShipViewOptions): string {
 
 export function renderThanks(o: { name: string; platform: string }): string {
   const waitlist = o.platform === 'deepscan';
-  const body = `<section class="container narrow section">
+  const body = `<section class="container narrow page-simple">
   <p class="eyebrow">${waitlist ? 'Deep scan' : 'Request received'}</p>
   <h1>${waitlist ? 'You are on the list.' : `Thanks${o.name && !o.name.startsWith('(') ? `, ${esc(o.name)}` : ''}.`}</h1>
   <p class="lead">${
     waitlist
-      ? 'We will email you once binary deep scans are live. Until then, the free project scan catches the vast majority of rejections.'
-      : 'We will reply within one business day with a confirmed scope and next steps. If you have a StoreLint report link, feel free to reply with it.'
+      ? 'We will email you once binary deep scans are live. Until then, the free project scan catches most rejections.'
+      : 'We reply within one business day with a confirmed scope and next steps. If you have a StoreLint report link, reply with it.'
   }</p>
-  <p><a class="btn btn-primary" href="/">Back to ${SITE_NAME}</a> <a class="btn btn-ghost" href="/#scan">Run a scan</a></p>
+  <div class="actions"><a class="btn btn-primary" href="/">Back to ${SITE_NAME}</a> <a class="btn btn-secondary" href="/#scan">Run a scan</a></div>
 </section>`;
   return layout({ title: `Thanks — ${SITE_NAME}`, description: 'Request received.', noindex: true, body });
 }

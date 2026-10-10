@@ -67,7 +67,7 @@ describe('GET /', () => {
     assert.match(res.headers.get('content-type') ?? '', /text\/html/);
     const html = await res.text();
     assert.match(html, /<title>StoreLint — lint your app before the store does<\/title>/);
-    assert.match(html, /npx github:iddriss\/storelint/);
+    assert.match(html, /npx @iraaj\/storelint/);
     assert.match(html, /action="\/scan" enctype="multipart\/form-data"/);
     for (const price of ['$149', '$199', '$299', '$99']) assert.ok(html.includes(price), price);
     assert.match(html, /href="\/ship"/);
@@ -176,7 +176,7 @@ describe('scanning', () => {
     );
     assert.equal(res.status, 201);
     const body = (await res.json()) as { id: string; url: string; report: Record<string, unknown> };
-    assert.match(body.url, /^https:\/\/storelint\.iraaj\.com\/r\/[A-Za-z0-9_-]+$/);
+    assert.match(body.url, /^https:\/\/storelint\.embracetech\.org\/r\/[A-Za-z0-9_-]+$/);
     assert.equal(body.report.schemaVersion, 1);
     assert.deepEqual(body.report.project, { path: '.', framework: 'flutter', name: 'my_app' });
     assert.deepEqual(body.report.summary, { blocker: 0, warning: 0, info: 1, score: 100 });
