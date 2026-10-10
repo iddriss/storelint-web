@@ -1,6 +1,6 @@
 # storelint-web
 
-Hosted web app for **StoreLint** (https://storelint.iraaj.com): free zip scans with shareable reports, and the
+Hosted web app for **StoreLint** (https://storelint.embracetech.org): free zip scans with shareable reports, and the
 "ship it for me" service page with its lead form. Conforms to `docs/STORELINT-SPEC.md` (Web contract, Finding
 JSON schema, Pricing).
 

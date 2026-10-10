@@ -172,7 +172,7 @@ describe('scanning', () => {
     const { app } = harness();
     const res = await app.request(
       '/api/scan',
-      zipUpload(sampleProjectZip(), { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'storelint.iraaj.com' }),
+      zipUpload(sampleProjectZip(), { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'storelint.embracetech.org' }),
     );
     assert.equal(res.status, 201);
     const body = (await res.json()) as { id: string; url: string; report: Record<string, unknown> };

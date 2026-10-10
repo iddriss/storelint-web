@@ -1,6 +1,6 @@
 export const SITE_NAME = 'StoreLint';
 export const SITE_TAGLINE = 'lint your app before the store does';
-export const SITE_URL = 'https://storelint.iraaj.com';
+export const SITE_URL = 'https://storelint.embracetech.org';
 export const CLI_COMMAND = 'npx github:iddriss/storelint';
 export const REPO_URL = 'https://github.com/iddriss/storelint';
 
