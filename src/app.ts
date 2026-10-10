@@ -7,7 +7,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Config } from './config.js';
+import type { OrderRow, OrderStatus } from './db.js';
 import type { Store } from './db.js';
+import type { FlutterwaveClient, VerifiedTransaction } from './flutterwave.js';
+import { FlutterwaveError, createFlutterwaveClient, judgePayment } from './flutterwave.js';
 import { validateLead } from './leads.js';
 import type { RateLimiter } from './ratelimit.js';
 import { createRateLimiter } from './ratelimit.js';
@@ -15,10 +18,13 @@ import { ScanInputError, scanUploadedZip } from './scan-service.js';
 import type { Scanner } from './scanner.js';
 import { errorMessage, normalizeReport } from './scanner.js';
 import type { Report } from './types.js';
+import { renderAdmin } from './views/admin.js';
 import { renderError } from './views/html.js';
 import { renderLanding } from './views/landing.js';
+import { isPlaceholderEmail, placeholderEmail, renderPaid, renderPayError, renderRetry } from './views/pay.js';
 import { renderReport } from './views/report.js';
-import { renderShip, renderThanks } from './views/ship.js';
+import { findTier, renderShip, renderThanks } from './views/ship.js';
+import type { Tier } from './views/ship.js';
 
 export interface AppDeps {
   store: Store;
@@ -26,7 +32,12 @@ export interface AppDeps {
   scanner: Scanner;
   limiter?: RateLimiter;
   now?: () => number;
+  /** Injected in tests to mock the Flutterwave API. */
+  fetch?: typeof fetch;
+  flutterwave?: FlutterwaveClient;
 }
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../public');
 const STATIC_TYPES: Record<string, string> = {
@@ -41,7 +52,13 @@ export function createApp(deps: AppDeps): Hono {
   const { store, config, scanner } = deps;
   const now = deps.now ?? Date.now;
   const limiter = deps.limiter ?? createRateLimiter({ ...config.rateLimit, now });
+  const flw: FlutterwaveClient | undefined =
+    deps.flutterwave ??
+    (config.flutterwave.secretKey
+      ? createFlutterwaveClient({ secretKey: config.flutterwave.secretKey, apiBase: config.flutterwave.apiBase, fetch: deps.fetch })
+      : undefined);
   const app = new Hono();
+  const cardOpts = { payLinks: config.payLinks, paymentsEnabled: config.paymentsEnabled };
 
   // ---- helpers -------------------------------------------------------------
 
@@ -68,14 +85,16 @@ export function createApp(deps: AppDeps): Hono {
     return `${proto}://${host}`;
   }
 
+  /** Separate buckets per feature (`scan`, `pay`) so scanning never locks someone out of paying. */
   const rateLimited =
-    (json: boolean): MiddlewareHandler =>
+    (json: boolean, bucket = 'scan'): MiddlewareHandler =>
     async (c, next) => {
-      const result = limiter.hit(clientIp(c));
+      const result = limiter.hit(`${bucket}:${clientIp(c)}`);
       if (!result.allowed) {
         c.header('Retry-After', String(result.retryAfterSec));
-        const msg = `Rate limit reached: ${config.rateLimit.limit} scans per hour per IP. Try again in ${Math.ceil(result.retryAfterSec / 60)} min, or run the CLI locally.`;
-        return json ? c.json({ error: msg }, 429) : c.html(renderError(429, 'Too many scans', msg), 429);
+        const what = bucket === 'pay' ? 'checkout attempts' : 'scans';
+        const msg = `Rate limit reached: ${config.rateLimit.limit} ${what} per hour per IP. Try again in ${Math.ceil(result.retryAfterSec / 60)} min${bucket === 'pay' ? '.' : ', or run the CLI locally.'}`;
+        return json ? c.json({ error: msg }, 429) : c.html(renderError(429, bucket === 'pay' ? 'Too many attempts' : 'Too many scans', msg), 429);
       }
       await next();
     };
@@ -126,7 +145,7 @@ export function createApp(deps: AppDeps): Hono {
     }
   });
 
-  app.get('/', (c) => c.html(renderLanding({ payLinks: config.payLinks, scannerAvailable: scanner.available })));
+  app.get('/', (c) => c.html(renderLanding({ ...cardOpts, scannerAvailable: scanner.available })));
 
   app.post('/scan', rateLimited(false), uploadLimit(false), async (c) => {
     try {
@@ -169,7 +188,7 @@ export function createApp(deps: AppDeps): Hono {
     );
   });
 
-  app.get('/ship', (c) => c.html(renderShip({ payLinks: config.payLinks, plan: c.req.query('plan') })));
+  app.get('/ship', (c) => c.html(renderShip({ ...cardOpts, plan: c.req.query('plan') })));
 
   app.post('/ship', async (c) => {
     let body: Record<string, unknown>;
@@ -180,20 +199,158 @@ export function createApp(deps: AppDeps): Hono {
     }
     const result = validateLead(body);
     if (!result.ok) {
-      return c.html(renderShip({ payLinks: config.payLinks, values: result.values, errors: result.errors }), 400);
+      return c.html(renderShip({ ...cardOpts, values: result.values, errors: result.errors }), 400);
     }
     if (!result.spam) store.insertLead({ ...result.lead, ip: clientIp(c) });
     return c.html(renderThanks({ name: result.lead.name, platform: result.lead.platform }));
   });
 
-  app.get('/admin/leads', (c) => {
+  // ---- hosted checkout (Flutterwave) ---------------------------------------
+
+  /**
+   * Verifies a transaction with the provider and records the outcome on the order.
+   * Idempotent: a paid order is never downgraded (see Store.updateOrder).
+   */
+  async function settleOrder(
+    order: OrderRow,
+    transactionId: string,
+    source: 'return' | 'webhook',
+  ): Promise<{ order: OrderRow; status: OrderStatus; reason?: string }> {
+    if (order.status === 'paid') return { order, status: 'paid' };
+    if (!flw) return { order, status: order.status, reason: 'payments are not configured' };
+    let verified: VerifiedTransaction;
+    try {
+      verified = await flw.verifyTransaction(transactionId);
+    } catch (err) {
+      console.error(`[pay:${source}] verify failed for order ${order.id} / flw ${transactionId}:`, err);
+      // Leave the order pending: the webhook (or a later visit) can still settle it.
+      return { order, status: order.status, reason: 'the payment could not be verified yet' };
+    }
+    const verdict = judgePayment(order, verified);
+    const status: OrderStatus = verdict.paid ? 'paid' : String(verified.status).toLowerCase() === 'cancelled' ? 'cancelled' : 'failed';
+    const customerEmail = verified.customer?.email;
+    const { row, changed } = store.updateOrder(order.id, {
+      status,
+      flw_id: String(verified.id),
+      raw_json: JSON.stringify(verified),
+      email: typeof customerEmail === 'string' && EMAIL_RE.test(customerEmail) && !isPlaceholderEmail(customerEmail) ? customerEmail : undefined,
+    });
+    if (changed) console.log(`[pay:${source}] order ${order.id} -> ${status}${verdict.paid ? '' : ` (${verdict.reason})`}`);
+    return { order: row ?? order, status: row?.status ?? status, reason: verdict.paid ? undefined : verdict.reason };
+  }
+
+  app.post('/pay/:plan', rateLimited(false, 'pay'), async (c) => {
+    const tier: Tier | undefined = findTier(c.req.param('plan'));
+    if (!tier) return c.html(renderError(404, 'Unknown package', 'Pick one of the packages on the pricing page.'), 404);
+    if (!flw) return c.html(renderError(404, 'Checkout not available', 'Online payment is not enabled on this server. Use the request form instead.'), 404);
+    let body: Record<string, unknown> = {};
+    try {
+      body = (await c.req.parseBody()) as Record<string, unknown>;
+    } catch {
+      /* empty body is fine */
+    }
+    if (typeof body.website === 'string' && body.website.trim()) return c.redirect('/ship', 303); // honeypot
+    const rawEmail = typeof body.email === 'string' ? body.email.trim().slice(0, 254) : '';
+    const email = EMAIL_RE.test(rawEmail) ? rawEmail : '';
+
+    const order = store.insertOrder({ plan: tier.key, amount_cents: tier.amountCents, currency: config.flutterwave.currency, email, ip: clientIp(c) });
+    try {
+      const link = await flw.createPayment({
+        tx_ref: order.tx_ref,
+        amount: order.amount_cents / 100,
+        currency: order.currency,
+        redirect_url: `${config.publicUrl}/pay/return`,
+        customer: { email: email || placeholderEmail(order.id, config.publicUrl) },
+        customizations: { title: 'StoreLint release ops', description: `${tier.name} (${tier.price})` },
+        meta: { order_id: order.id, plan: tier.key },
+      });
+      console.log(`[pay] order ${order.id} (${tier.key}, ${order.currency} ${order.amount_cents / 100}) -> hosted checkout`);
+      c.header('Cache-Control', 'no-store');
+      return c.redirect(link, 303);
+    } catch (err) {
+      const detail = err instanceof FlutterwaveError ? err.message : 'unexpected error';
+      console.error(`[pay] create payment failed for order ${order.id}:`, err);
+      store.updateOrder(order.id, { status: 'failed', raw_json: JSON.stringify({ stage: 'create', error: detail }) });
+      return c.html(renderPayError({ tier, detail }), 502);
+    }
+  });
+
+  app.get('/pay/return', rateLimited(false, 'pay'), async (c) => {
     c.header('Cache-Control', 'no-store');
-    const token = c.req.query('token') ?? '';
-    if (!config.adminToken || !safeEqual(token, config.adminToken)) {
+    const txRef = c.req.query('tx_ref') ?? '';
+    const qStatus = (c.req.query('status') ?? '').toLowerCase();
+    const transactionId = c.req.query('transaction_id') ?? '';
+    const order = /^sl_[0-9a-f]{16}$/.test(txRef) ? store.getOrderByTxRef(txRef) : undefined;
+    if (!order) return c.html(renderError(404, 'Order not found', 'We could not match this payment to an order. If you were charged, reply to the Flutterwave receipt.'), 404);
+    const tier = findTier(order.plan);
+
+    if (order.status === 'paid') return c.html(renderPaid({ order, tier }));
+
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(transactionId)) {
+      // Cancelled or failed before a transaction existed: nothing to verify.
+      const status: OrderStatus = qStatus === 'cancelled' ? 'cancelled' : 'failed';
+      const { row } = store.updateOrder(order.id, { status, raw_json: JSON.stringify({ stage: 'return', query: { status: qStatus } }) });
+      return c.html(renderRetry({ order: row ?? order, tier, status }));
+    }
+
+    const result = await settleOrder(order, transactionId, 'return');
+    if (result.status === 'paid') return c.html(renderPaid({ order: result.order, tier }));
+    const shown = result.status === 'pending' ? 'pending' : result.status === 'cancelled' ? 'cancelled' : 'failed';
+    return c.html(renderRetry({ order: result.order, tier, status: shown, reason: result.reason }));
+  });
+
+  // Registered after /pay/return so the redirect never shadows it.
+  app.get('/pay/:plan', (c) => c.redirect(`/ship?plan=${encodeURIComponent(c.req.param('plan'))}#prices`, 303));
+
+  app.post('/webhooks/flutterwave', async (c) => {
+    const hash = c.req.header('verif-hash') ?? '';
+    if (!config.flutterwave.webhookHash || !hash || !safeEqual(hash, config.flutterwave.webhookHash)) {
       return c.json({ error: 'unauthorized' }, 401);
     }
-    const leads = store.listLeads().map((l) => ({ ...l, created_at: new Date(l.created_at).toISOString() }));
+    let payload: { event?: unknown; data?: { id?: unknown; tx_ref?: unknown; status?: unknown } };
+    try {
+      payload = (await c.req.json()) as typeof payload;
+    } catch {
+      return c.json({ error: 'invalid json' }, 400);
+    }
+    if (payload.event !== 'charge.completed') return c.json({ ok: true, ignored: String(payload.event ?? '') });
+    const txRef = typeof payload.data?.tx_ref === 'string' ? payload.data.tx_ref : '';
+    const id = payload.data?.id;
+    const transactionId = typeof id === 'number' || typeof id === 'string' ? String(id) : '';
+    const order = txRef ? store.getOrderByTxRef(txRef) : undefined;
+    if (!order || !transactionId) {
+      console.warn(`[pay:webhook] charge.completed for unknown order tx_ref=${txRef} id=${transactionId}`);
+      return c.json({ ok: true, ignored: 'unknown order' });
+    }
+    const result = await settleOrder(order, transactionId, 'webhook');
+    return c.json({ ok: true, order: order.id, status: result.status });
+  });
+
+  // ---- admin ---------------------------------------------------------------
+
+  function adminAuthorized(c: Context): boolean {
+    c.header('Cache-Control', 'no-store');
+    const token = c.req.query('token') ?? '';
+    return Boolean(config.adminToken) && safeEqual(token, config.adminToken ?? '');
+  }
+
+  const iso = <T extends { created_at: number }>(rows: T[]) => rows.map((r) => ({ ...r, created_at: new Date(r.created_at).toISOString() }));
+
+  app.get('/admin/leads', (c) => {
+    if (!adminAuthorized(c)) return c.json({ error: 'unauthorized' }, 401);
+    const leads = iso(store.listLeads());
     return c.json({ count: leads.length, leads });
+  });
+
+  app.get('/admin/orders', (c) => {
+    if (!adminAuthorized(c)) return c.json({ error: 'unauthorized' }, 401);
+    const orders = iso(store.listOrders()).map((o) => ({ ...o, updated_at: new Date(o.updated_at).toISOString() }));
+    return c.json({ count: orders.length, orders });
+  });
+
+  app.get('/admin', (c) => {
+    if (!adminAuthorized(c)) return c.html(renderError(401, 'Unauthorized', 'Add ?token=ADMIN_TOKEN to the address.'), 401);
+    return c.html(renderAdmin({ orders: store.listOrders(), leads: store.listLeads(), paymentsEnabled: config.paymentsEnabled }));
   });
 
   app.notFound((c) => {

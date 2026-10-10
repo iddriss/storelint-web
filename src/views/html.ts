@@ -6,7 +6,7 @@ export const REPO_URL = 'https://github.com/iddriss/storelint';
 export const NPM_URL = 'https://www.npmjs.com/package/@iraaj/storelint';
 export const CLI_VERSION = '0.1.0';
 /** Bump when style.css changes so clients past the 1h static cache pick it up. */
-export const STYLE_VERSION = '3';
+export const STYLE_VERSION = '4';
 
 export function esc(value: unknown): string {
   return String(value ?? '')

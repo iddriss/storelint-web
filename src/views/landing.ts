@@ -4,6 +4,7 @@ import { renderTierCards } from './ship.js';
 
 export interface LandingOptions {
   payLinks: PayLinks;
+  paymentsEnabled?: boolean;
   scannerAvailable: boolean;
 }
 
@@ -181,7 +182,7 @@ export function renderLanding(o: LandingOptions): string {
       <h2>Need it shipped?</h2>
       <p class="lead">The scanner is free. If you want the findings fixed and the app live on the stores, we do it for a fixed price with a 48-hour turnaround.</p>
     </div>
-    ${renderTierCards(o.payLinks)}
+    ${renderTierCards({ payLinks: o.payLinks, paymentsEnabled: o.paymentsEnabled })}
     <div class="card waitlist">
       <div class="waitlist-text">
         <h3>Deep scan <span class="badge">coming soon</span></h3>

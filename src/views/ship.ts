@@ -5,42 +5,70 @@ import { SITE_NAME, SITE_URL, esc, layout } from './html.js';
 
 export interface ShipViewOptions {
   payLinks: PayLinks;
+  /** When true (FLW_SECRET_KEY set), price cards post to /pay/:plan unless a PAY_LINK_* wins. */
+  paymentsEnabled?: boolean;
   /** Pre-selected platform (from ?plan=). */
   plan?: string;
   values?: Partial<LeadFormValues>;
   errors?: Partial<Record<keyof LeadFormValues, string>>;
 }
 
+export type PlanKey = 'play' | 'ios' | 'both' | 'fix';
+
 export interface Tier {
-  key: 'play' | 'ios' | 'both' | 'fix';
+  key: PlanKey;
   name: string;
   price: string;
+  /** Charged amount in minor units (USD cents). Keep in sync with `price`. */
+  amountCents: number;
   blurb: string;
   featured?: boolean;
 }
 
 export const TIERS: Tier[] = [
-  { key: 'play', name: 'Google Play', price: '$149', blurb: 'Android release to production on Play, including the Data Safety and content-rating forms.' },
-  { key: 'ios', name: 'App Store', price: '$199', blurb: 'iOS release through App Store Connect, including privacy manifest, usage strings and review notes.' },
-  { key: 'both', name: 'Both stores', price: '$299', blurb: 'Android and iOS together. One handover, one invoice.', featured: true },
-  { key: 'fix', name: 'Fix a rejection', price: '$99', blurb: 'Already rejected? Send the review message. We fix the cause and resubmit.' },
+  { key: 'play', name: 'Google Play', price: '$149', amountCents: 14900, blurb: 'Android release to production on Play, including the Data Safety and content-rating forms.' },
+  { key: 'ios', name: 'App Store', price: '$199', amountCents: 19900, blurb: 'iOS release through App Store Connect, including privacy manifest, usage strings and review notes.' },
+  { key: 'both', name: 'Both stores', price: '$299', amountCents: 29900, blurb: 'Android and iOS together. One handover, one invoice.', featured: true },
+  { key: 'fix', name: 'Fix a rejection', price: '$99', amountCents: 9900, blurb: 'Already rejected? Send the review message. We fix the cause and resubmit.' },
 ];
 
-export function tierButton(t: Tier, links: PayLinks): string {
+export function findTier(plan: string | undefined): Tier | undefined {
+  return TIERS.find((t) => t.key === plan);
+}
+
+export interface TierCardOptions {
+  payLinks: PayLinks;
+  paymentsEnabled?: boolean;
+  /** Prefills the email field of the /pay forms (e.g. from the lead form). */
+  email?: string;
+}
+
+/**
+ * Precedence: PAY_LINK_* (external link) > hosted checkout form (FLW_SECRET_KEY set) > scroll to the lead form.
+ */
+export function tierButton(t: Tier, o: TierCardOptions): string {
   const cls = t.featured ? 'btn btn-primary' : 'btn btn-secondary';
-  const pay = links[t.key];
+  const pay = o.payLinks[t.key];
   if (pay) return `<a class="${cls}" href="${esc(pay)}" rel="noopener">Pay ${esc(t.price)} &amp; start</a>`;
+  if (o.paymentsEnabled) {
+    return `<form class="pay-form" method="post" action="/pay/${t.key}" data-busy="Opening checkout…">
+      <input type="text" name="website" class="hp" tabindex="-1" autocomplete="off" aria-hidden="true">
+      <label class="sr-only" for="pay-email-${t.key}">Email for the receipt and intake checklist</label>
+      <input id="pay-email-${t.key}" type="email" name="email" maxlength="254" autocomplete="email" placeholder="you@company.com" required value="${esc(o.email ?? '')}">
+      <button type="submit" class="${cls}">Pay ${esc(t.price)} &amp; start</button>
+    </form>`;
+  }
   return `<a class="${cls}" href="/ship?plan=${t.key}#lead">Request this</a>`;
 }
 
-export function renderTierCards(links: PayLinks): string {
+export function renderTierCards(o: TierCardOptions): string {
   return `<div class="grid grid-4">
 ${TIERS.map(
   (t) => `  <div class="card price-card${t.featured ? ' price-featured' : ''}">
     <h3>${esc(t.name)}</h3>
     <p class="price">${esc(t.price)}</p>
     <p>${esc(t.blurb)}</p>
-    ${tierButton(t, links)}
+    ${tierButton(t, o)}
   </div>`,
 ).join('\n')}
 </div>`;
@@ -74,7 +102,7 @@ export function renderShip(o: ShipViewOptions): string {
   const options = PLATFORMS.filter((p) => p !== 'deepscan')
     .map((p) => `<option value="${p}"${v.platform === p ? ' selected' : ''}>${esc(PLATFORM_LABELS[p])}</option>`)
     .join('');
-  const anyPayLink = Object.values(o.payLinks).some(Boolean);
+  const anyPayLink = Object.values(o.payLinks).some(Boolean) || Boolean(o.paymentsEnabled);
 
   const body = `
 <section class="hero hero-sm">
@@ -97,11 +125,11 @@ export function renderShip(o: ShipViewOptions): string {
       <h2>Pick a package.</h2>
       <p class="lead">${
         anyPayLink
-          ? 'Pay to start right away, or use the form below if you want to talk first. We reply within one business day.'
+          ? 'Pay to start right away (card, secured by Flutterwave), or use the form below if you want to talk first. We reply within one business day.'
           : 'Payment is collected after we confirm scope. Request a package and we reply within one business day.'
       }</p>
     </div>
-    ${renderTierCards(o.payLinks)}
+    ${renderTierCards({ payLinks: o.payLinks, paymentsEnabled: o.paymentsEnabled, email: v.email })}
   </div>
 </section>
 
