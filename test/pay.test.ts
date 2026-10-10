@@ -247,15 +247,21 @@ describe('GET /pay/return', () => {
     const h = harness({ responder: flwResponder(successful()) });
     const { order, flwId } = await startOrder(h);
     const res = await h.app.request(`/pay/return?status=successful&tx_ref=${order.id}&transaction_id=${flwId}`);
-    assert.equal(res.status, 200);
-    const html = await res.text();
+    const paid = h.store.getOrder(order.id)!;
+    assert.equal(res.status, 303);
+    assert.equal(res.headers.get('location'), `/o/${paid.id}/${paid.access_token}`);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const page = await h.app.request(res.headers.get('location') ?? '');
+    assert.equal(page.status, 200);
+    const html = await page.text();
     assert.match(html, /Payment received/);
-    assert.match(html, /email you within 24 hours/);
-    assert.match(html, /Intake checklist/);
+    assert.doesNotMatch(html, /email you within 24 hours/, 'the old promise is gone');
+    assert.match(html, /Full intake checklist/);
     assert.match(html, /Repository access/);
     assert.match(html, /App Store Connect: invite us/);
-    const paid = h.store.getOrder(order.id)!;
     assert.equal(paid.status, 'paid');
+    assert.equal(paid.stage, 'paid');
+    assert.equal(paid.paid_at, Date.UTC(2026, 9, 10, 12, 0, 0));
     assert.equal(paid.flw_id, flwId);
     assert.match(paid.raw_json ?? '', /"status":"successful"/);
     const verify = h.calls[1]!;
@@ -401,34 +407,44 @@ describe('POST /webhooks/flutterwave', () => {
   });
 });
 
-describe('admin', () => {
-  it('GET /admin/orders returns orders as JSON behind the token', async () => {
+describe('admin JSON API', () => {
+  it('GET /admin/api/orders returns orders behind the bearer token, never a query token', async () => {
     const h = harness({ responder: flwResponder(successful()) });
     const { order } = await startOrder(h);
-    assert.equal((await h.app.request('/admin/orders')).status, 401);
-    assert.equal((await h.app.request('/admin/orders?token=wrong')).status, 401);
-    const res = await h.app.request('/admin/orders?token=adm1n');
+    assert.equal((await h.app.request('/admin/api/orders')).status, 401);
+    assert.equal((await h.app.request('/admin/api/orders?token=adm1n')).status, 401);
+    assert.equal((await h.app.request('/admin/api/orders', { headers: { authorization: 'Bearer wrong' } })).status, 401);
+    assert.equal((await h.app.request('/admin/orders?token=adm1n')).status, 401, 'the old URL is dead');
+    const res = await h.app.request('/admin/api/orders', { headers: { authorization: 'Bearer adm1n' } });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { count: number; orders: Array<{ id: string; status: string; created_at: string }> };
+    const text = await res.text();
+    assert.doesNotMatch(text, new RegExp(order.access_token), 'client secrets stay out of the API');
+    const body = JSON.parse(text) as { count: number; orders: Array<{ id: string; status: string; created_at: string; admin_url: string }> };
     assert.equal(body.count, 1);
     assert.equal(body.orders[0]?.id, order.id);
     assert.equal(body.orders[0]?.status, 'pending');
+    assert.equal(body.orders[0]?.admin_url, `https://storelint.example/admin/orders/${order.id}`);
     assert.match(body.orders[0]?.created_at ?? '', /^2026-10-10T12:00:00/);
   });
 
-  it('GET /admin renders orders and leads together', async () => {
+  it('GET /admin/api/summary reports counts and revenue', async () => {
     const h = harness({ responder: flwResponder(successful({ amount: 299, charged_amount: 299 })) });
     const { order, flwId } = await startOrder(h, 'both');
     await h.app.request(`/pay/return?status=successful&tx_ref=${order.id}&transaction_id=${flwId}`);
     h.store.insertLead({ name: 'Grace Hopper', email: 'grace@example.com', platform: 'ios', store_links: '', repo_url: '', message: 'hi', ip: '' });
-    assert.equal((await h.app.request('/admin')).status, 401);
-    const res = await h.app.request('/admin?token=adm1n');
+    const res = await h.app.request('/admin/api/summary', { headers: { authorization: 'Bearer adm1n' } });
     assert.equal(res.status, 200);
-    const html = await res.text();
-    assert.match(html, /1 paid, \$299 collected/);
-    assert.match(html, /status-paid/);
-    assert.match(html, new RegExp(order.id));
-    assert.match(html, /Grace Hopper/);
+    const body = (await res.json()) as {
+      leads: { new: number };
+      orders: { awaiting_intake: number; in_progress: number };
+      revenue: { this_month: Array<{ currency: string; cents: number }>; all_time: Array<{ currency: string; cents: number; orders: number }> };
+      email: { configured: boolean };
+    };
+    assert.equal(body.leads.new, 1);
+    assert.equal(body.orders.awaiting_intake, 1);
+    assert.deepEqual(body.revenue.all_time, [{ currency: 'USD', cents: 29900, orders: 1 }]);
+    assert.equal(body.revenue.this_month[0]?.cents, 29900);
+    assert.equal(body.email.configured, false);
   });
 });
 

@@ -145,25 +145,42 @@ describe('/ship', () => {
   });
 });
 
-describe('GET /admin/leads', () => {
-  it('requires the admin token', async () => {
+describe('GET /admin/api/leads', () => {
+  const bearer = (token: string) => ({ headers: { authorization: `Bearer ${token}` } });
+
+  it('requires the admin token as a bearer header', async () => {
     const { app, store } = harness({ adminToken: 's3cret' });
     store.insertLead({ ...VALID_LEAD, ip: '1.2.3.4' });
-    assert.equal((await app.request('/admin/leads')).status, 401);
-    assert.equal((await app.request('/admin/leads?token=wrong')).status, 401);
-    assert.equal((await app.request('/admin/leads?token=s3cret-but-longer')).status, 401);
-    const res = await app.request('/admin/leads?token=s3cret');
+    assert.equal((await app.request('/admin/api/leads')).status, 401);
+    assert.equal((await app.request('/admin/api/leads', bearer('wrong'))).status, 401);
+    assert.equal((await app.request('/admin/api/leads', bearer('s3cret-but-longer'))).status, 401);
+    assert.equal((await app.request('/admin/api/leads?token=s3cret')).status, 401, 'query tokens are never read');
+    const res = await app.request('/admin/api/leads', bearer('s3cret'));
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { count: number; leads: Array<{ email: string; created_at: string }> };
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const body = (await res.json()) as { count: number; leads: Array<{ email: string; created_at: string; status: string }> };
     assert.equal(body.count, 1);
     assert.equal(body.leads[0]?.email, 'ada@example.com');
+    assert.equal(body.leads[0]?.status, 'new');
     assert.match(body.leads[0]?.created_at ?? '', /^2026-10-10T12:00:00/);
   });
 
   it('is locked when ADMIN_TOKEN is unset', async () => {
     const { app } = harness();
-    assert.equal((await app.request('/admin/leads?token=')).status, 401);
-    assert.equal((await app.request('/admin/leads?token=anything')).status, 401);
+    assert.equal((await app.request('/admin/api/leads', bearer(''))).status, 401);
+    assert.equal((await app.request('/admin/api/leads', bearer('anything'))).status, 401);
+    assert.equal((await app.request('/admin/api/leads', bearer('undefined'))).status, 401);
+  });
+
+  it('the old /admin/leads?token= URL no longer returns data', async () => {
+    const { app, store } = harness({ adminToken: 's3cret' });
+    store.insertLead({ ...VALID_LEAD, ip: '1.2.3.4' });
+    const res = await app.request('/admin/leads?token=s3cret');
+    assert.equal(res.status, 401);
+    assert.doesNotMatch(await res.text(), /ada@example\.com/);
+    const plain = await app.request('/admin/leads');
+    assert.equal(plain.status, 303);
+    assert.equal(plain.headers.get('location'), '/admin');
   });
 });
 

@@ -356,10 +356,11 @@ describe('v4 return (GET /pay/return)', () => {
     const h = harness();
     const { order, chargeId } = await startOrder(h);
     const res = await h.app.request(`/pay/return?tx_ref=${order.id}`);
-    assert.equal(res.status, 200);
-    assert.match(await res.text(), /Payment received/);
     const paid = h.store.getOrder(order.id)!;
+    assert.equal(res.status, 303);
+    assert.equal(res.headers.get('location'), `/o/${paid.id}/${paid.access_token}`);
     assert.equal(paid.status, 'paid');
+    assert.equal(paid.stage, 'paid');
     assert.equal(paid.flw_id, chargeId);
     assert.match(paid.raw_json ?? '', /"status":"successful"/);
     assert.match(paid.raw_json ?? '', /"api_version":"v4"/);

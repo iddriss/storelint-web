@@ -1,3 +1,4 @@
+import { isPlaceholderEmail } from '../addresses.js';
 import type { OrderRow } from '../db.js';
 import { SITE_NAME, esc, layout } from './html.js';
 import { INTAKE_CHECKLIST } from './intake.js';
@@ -17,21 +18,6 @@ function orderMeta(order: OrderRow, tier: Tier | undefined): string {
   </dl>`;
 }
 
-/** Placeholder we send to Flutterwave when the buyer left the email field empty. */
-export function placeholderEmail(orderId: string, publicUrl: string): string {
-  let host = 'storelint.embracetech.org';
-  try {
-    host = new URL(publicUrl).hostname || host;
-  } catch {
-    /* keep default */
-  }
-  return `orders+${orderId}@${host}`;
-}
-
-export function isPlaceholderEmail(email: string): boolean {
-  return /^orders\+sl_[0-9a-f]+@/i.test(email);
-}
-
 export function renderChecklist(): string {
   return INTAKE_CHECKLIST.map(
     (g) => `<div class="card checklist-group">
@@ -41,33 +27,25 @@ export function renderChecklist(): string {
   ).join('\n');
 }
 
-export function renderPaid(o: { order: OrderRow; tier: Tier | undefined }): string {
-  const noEmail = !o.order.email || isPlaceholderEmail(o.order.email);
+/**
+ * Shown on /pay/return for a paid order when this browser cannot be tied to the checkout
+ * (no checkout cookie and the payment is not fresh). It confirms the payment without
+ * revealing the private order link; the link travels by email only.
+ */
+export function renderPaid(o: { order: OrderRow; tier: Tier | undefined; emailEnabled: boolean; team: string }): string {
+  const hasEmail = Boolean(o.order.email) && !isPlaceholderEmail(o.order.email);
+  const lead =
+    o.emailEnabled && hasEmail
+      ? 'Your receipt and the link to your private order page were emailed to the address on this order. The intake form and progress updates live on that page.'
+      : `This order is paid. Your private order page link is not shown here for your security: write to ${o.team} quoting the order number below and we will send it to you.`;
   const body = `<section class="container narrow page-simple">
   <p class="eyebrow">Payment received</p>
-  <h1>Thanks. Let&rsquo;s get it shipped.</h1>
-  <p class="lead">We&rsquo;ll email you within 24 hours with the intake checklist and where to send everything. The 48-hour clock starts once we have the items below.</p>
+  <h1>Thanks. This order is paid.</h1>
+  <p class="lead">${esc(lead)}</p>
   ${orderMeta(o.order, o.tier)}
-  ${
-    noEmail
-      ? `<p class="notice">We did not get an email address with this payment. <a class="inline" href="/ship?plan=${esc(o.order.plan)}#lead">Send us a note</a> quoting order <code>${esc(o.order.id)}</code> so we know where to reach you.</p>`
-      : ''
-  }
-  <div class="actions"><a class="btn btn-primary" href="#checklist">See the intake checklist</a> <a class="btn btn-secondary" href="/">Back to ${SITE_NAME}</a></div>
-</section>
-<section class="section" id="checklist">
-  <div class="container">
-    <div class="section-head tight">
-      <span class="eyebrow">Intake checklist</span>
-      <h2>What we need from you.</h2>
-      <p class="lead">Send everything in one message or shared folder. Items marked (Play) or (Apple) apply to that store only. Never send keys, passwords or .env values in chat; use a password-manager share or an encrypted file.</p>
-    </div>
-    <div class="grid grid-3">
-      ${renderChecklist()}
-    </div>
-  </div>
+  <div class="actions">${o.emailEnabled ? '<a class="btn btn-primary" href="/orders/find">Email me my order link</a> ' : ''}<a class="btn btn-secondary" href="/">Back to ${SITE_NAME}</a></div>
 </section>`;
-  return layout({ title: `Payment received — ${SITE_NAME}`, description: 'Payment received. Intake checklist.', noindex: true, body });
+  return layout({ title: `Payment received — ${SITE_NAME}`, description: 'Payment received.', noindex: true, noReferrer: true, body });
 }
 
 export function renderRetry(o: { order: OrderRow; tier: Tier | undefined; status: 'failed' | 'cancelled' | 'pending'; reason?: string }): string {
@@ -109,3 +87,5 @@ export function renderPayError(o: { tier: Tier | undefined; detail?: string }): 
 </section>`;
   return layout({ title: `Checkout unavailable — ${SITE_NAME}`, description: 'Checkout unavailable.', noindex: true, body });
 }
+
+export { isPlaceholderEmail, placeholderEmail } from '../addresses.js';

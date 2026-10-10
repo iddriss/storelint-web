@@ -1,27 +1,33 @@
-import { getConnInfo } from '@hono/node-server/conninfo';
 import { Hono } from 'hono';
 import type { Context, MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { EMAIL_RE, isPlaceholderEmail, placeholderEmail } from './addresses.js';
+import { PAY_COOKIE, payCookie, payCookieValue, readCookie, safeEqual } from './auth.js';
 import type { Config } from './config.js';
 import type { OrderRow, OrderStatus } from './db.js';
 import type { Store } from './db.js';
 import type { FlutterwaveClient, VerifiedTransaction, WebhookEvent } from './flutterwave.js';
 import { FlutterwaveError, createFlutterwaveClient, judgePayment } from './flutterwave.js';
+import type { RouteContext } from './http.js';
+import { clientIp, publicOrigin } from './http.js';
 import { validateLead } from './leads.js';
+import type { MailTransport } from './mailer.js';
+import { Outbox, createSmtpTransport } from './mailer.js';
+import { createNotifier } from './notify.js';
 import type { RateLimiter } from './ratelimit.js';
 import { createRateLimiter } from './ratelimit.js';
+import { registerAdminRoutes } from './routes/admin.js';
+import { registerClientRoutes } from './routes/client.js';
 import { ScanInputError, scanUploadedZip } from './scan-service.js';
 import type { Scanner } from './scanner.js';
 import { errorMessage, normalizeReport } from './scanner.js';
 import type { Report } from './types.js';
-import { renderAdmin } from './views/admin.js';
 import { renderError } from './views/html.js';
 import { renderLanding } from './views/landing.js';
-import { isPlaceholderEmail, placeholderEmail, renderPaid, renderPayError, renderRetry } from './views/pay.js';
+import { renderPaid, renderPayError, renderRetry } from './views/pay.js';
 import { renderReport } from './views/report.js';
 import { findTier, renderShip, renderThanks } from './views/ship.js';
 import type { Tier } from './views/ship.js';
@@ -35,9 +41,17 @@ export interface AppDeps {
   /** Injected in tests to mock the Flutterwave API. */
   fetch?: typeof fetch;
   flutterwave?: FlutterwaveClient;
+  /** The process-wide outbox (index.ts owns its timer). Built here when omitted. */
+  outbox?: Outbox;
+  /** Injected in tests to capture mail without a network. Ignored when `outbox` is given. */
+  mailTransport?: MailTransport;
 }
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+/**
+ * How long after payment /pay/return still redirects a browser without the checkout cookie
+ * to the private order page (covers the cookie being dropped on the way back from the provider).
+ */
+export const PAID_RETURN_GRACE_MS = 30 * 60 * 1000;
 
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../public');
 const STATIC_TYPES: Record<string, string> = {
@@ -58,41 +72,43 @@ export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
   const cardOpts = { payLinks: config.payLinks, paymentsEnabled: checkoutOn };
 
+  const outbox =
+    deps.outbox ??
+    new Outbox({
+      store,
+      now,
+      from: { name: config.smtp.fromName, address: config.smtp.from ?? config.notifyEmail },
+      transport: deps.mailTransport ?? (config.smtp.configured ? createSmtpTransport(config.smtp) : undefined),
+    });
+  const notifier = createNotifier({ outbox, store, publicUrl: config.publicUrl, notifyEmail: config.notifyEmail, now });
+  const routeContext: RouteContext = {
+    app,
+    store,
+    config,
+    now,
+    outbox,
+    notifier,
+    checkoutOn,
+    limiters: {
+      login: createRateLimiter({ limit: 5, windowMs: 15 * 60 * 1000, now }),
+      orderLookup: createRateLimiter({ limit: 20, windowMs: 60 * 60 * 1000, now }),
+      intake: createRateLimiter({ limit: 20, windowMs: 60 * 60 * 1000, now }),
+      find: createRateLimiter({ limit: 5, windowMs: 60 * 60 * 1000, now }),
+    },
+  };
+
   // ---- helpers -------------------------------------------------------------
 
-  /** First X-Forwarded-For entry (Cloudflare -> Traefik -> us), else the socket address. */
-  function clientIp(c: Context): string {
-    const xff = c.req.header('x-forwarded-for');
-    if (xff) {
-      const first = xff.split(',')[0]?.trim();
-      if (first) return first;
-    }
-    try {
-      const addr = getConnInfo(c).remote.address;
-      if (addr) return addr;
-    } catch {
-      /* no socket (e.g. app.request() in tests) */
-    }
-    return 'unknown';
-  }
-
-  function publicOrigin(c: Context): string {
-    const url = new URL(c.req.url);
-    const proto = c.req.header('x-forwarded-proto')?.split(',')[0]?.trim() || url.protocol.replace(':', '');
-    const host = c.req.header('x-forwarded-host')?.split(',')[0]?.trim() || c.req.header('host') || url.host;
-    return `${proto}://${host}`;
-  }
-
-  /** Separate buckets per feature (`scan`, `pay`) so scanning never locks someone out of paying. */
+  /** Separate buckets per feature (`scan`, `pay`, `lead`) so scanning never locks someone out of paying or asking. */
   const rateLimited =
     (json: boolean, bucket = 'scan'): MiddlewareHandler =>
     async (c, next) => {
       const result = limiter.hit(`${bucket}:${clientIp(c)}`);
       if (!result.allowed) {
         c.header('Retry-After', String(result.retryAfterSec));
-        const what = bucket === 'pay' ? 'checkout attempts' : 'scans';
-        const msg = `Rate limit reached: ${config.rateLimit.limit} ${what} per hour per IP. Try again in ${Math.ceil(result.retryAfterSec / 60)} min${bucket === 'pay' ? '.' : ', or run the CLI locally.'}`;
-        return json ? c.json({ error: msg }, 429) : c.html(renderError(429, bucket === 'pay' ? 'Too many attempts' : 'Too many scans', msg), 429);
+        const what = bucket === 'pay' ? 'checkout attempts' : bucket === 'lead' ? 'requests' : 'scans';
+        const msg = `Rate limit reached: ${config.rateLimit.limit} ${what} per hour per IP. Try again in ${Math.ceil(result.retryAfterSec / 60)} min${bucket === 'scan' ? ', or run the CLI locally.' : '.'}`;
+        return json ? c.json({ error: msg }, 429) : c.html(renderError(429, bucket === 'scan' ? 'Too many scans' : 'Too many attempts', msg), 429);
       }
       await next();
     };
@@ -188,7 +204,8 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get('/ship', (c) => c.html(renderShip({ ...cardOpts, plan: c.req.query('plan') })));
 
-  app.post('/ship', async (c) => {
+  // Each stored lead sends two emails (team + acknowledgement), so the form is rate limited like the other public writes.
+  app.post('/ship', rateLimited(false, 'lead'), async (c) => {
     let body: Record<string, unknown>;
     try {
       body = (await c.req.parseBody()) as Record<string, unknown>;
@@ -199,8 +216,8 @@ export function createApp(deps: AppDeps): Hono {
     if (!result.ok) {
       return c.html(renderShip({ ...cardOpts, values: result.values, errors: result.errors }), 400);
     }
-    if (!result.spam) store.insertLead({ ...result.lead, ip: clientIp(c) });
-    return c.html(renderThanks({ name: result.lead.name, platform: result.lead.platform }));
+    if (!result.spam) notifier.leadCreated(store.insertLead({ ...result.lead, ip: clientIp(c) }));
+    return c.html(renderThanks({ name: result.lead.name, platform: result.lead.platform, emailEnabled: outbox.configured }));
   });
 
   // ---- hosted checkout (Flutterwave) ---------------------------------------
@@ -235,6 +252,9 @@ export function createApp(deps: AppDeps): Hono {
       email: typeof customerEmail === 'string' && EMAIL_RE.test(customerEmail) && !isPlaceholderEmail(customerEmail) ? customerEmail : undefined,
     });
     if (changed) console.log(`[pay:${source}] order ${order.id} -> ${status}${verdict.paid ? '' : ` (${verdict.reason})`}`);
+    // `changed` is true exactly once per status, so the webhook and the return page cannot both send these.
+    if (changed && row && row.status === 'paid') notifier.orderPaid(row);
+    if (changed && row && row.status === 'failed' && !verdict.paid) notifier.paymentFailed(row, verdict.reason);
     return { order: row ?? order, status: row?.status ?? status, reason: verdict.paid ? undefined : verdict.reason };
   }
 
@@ -266,6 +286,7 @@ export function createApp(deps: AppDeps): Hono {
       if (providerId) store.updateOrder(order.id, { status: 'pending', flw_id: providerId });
       console.log(`[pay] order ${order.id} (${tier.key}, ${order.currency} ${order.amount_cents / 100}) -> hosted checkout (${flw.version}${providerId ? ` ${providerId}` : ''})`);
       c.header('Cache-Control', 'no-store');
+      c.header('Set-Cookie', payCookie(order.id, order.access_token));
       return c.redirect(link, 303);
     } catch (err) {
       const detail = err instanceof FlutterwaveError ? err.message : 'unexpected error';
@@ -283,7 +304,24 @@ export function createApp(deps: AppDeps): Hono {
     if (!order) return c.html(renderError(404, 'Order not found', 'We could not match this payment to an order. If you were charged, reply to the Flutterwave receipt.'), 404);
     const tier = findTier(order.plan);
 
-    if (order.status === 'paid') return c.html(renderPaid({ order, tier }));
+    /**
+     * A paid order sends the buyer to their private page. The tx_ref in this URL is not a
+     * secret (the provider shows it on receipts), so the redirect needs more than that: the
+     * checkout cookie set by POST /pay/:plan, or a payment that verified moments ago. Anyone
+     * else gets a plain confirmation, and the link by email.
+     */
+    const paidResponse = (paid: OrderRow) => {
+      const cookie = readCookie(c.req.header('cookie'), PAY_COOKIE) ?? '';
+      const ownBrowser = safeEqual(cookie, payCookieValue(paid.id, paid.access_token));
+      const fresh = now() - (paid.paid_at ?? paid.updated_at) <= PAID_RETURN_GRACE_MS;
+      if (paid.access_token && (ownBrowser || fresh)) {
+        c.header('Referrer-Policy', 'no-referrer');
+        return c.redirect(`/o/${paid.id}/${paid.access_token}`, 303);
+      }
+      return c.html(renderPaid({ order: paid, tier, emailEnabled: outbox.configured, team: config.notifyEmail }));
+    };
+
+    if (order.status === 'paid') return paidResponse(order);
 
     // v3 appends transaction_id; v4 does not document what it appends, so fall back to the charge id we stored at creation.
     const transactionId = c.req.query('transaction_id') || order.flw_id || '';
@@ -296,7 +334,7 @@ export function createApp(deps: AppDeps): Hono {
     }
 
     const result = await settleOrder(order, transactionId, 'return');
-    if (result.status === 'paid') return c.html(renderPaid({ order: result.order, tier }));
+    if (result.status === 'paid') return paidResponse(result.order);
     const shown = result.status === 'pending' ? 'pending' : result.status === 'cancelled' ? 'cancelled' : 'failed';
     return c.html(renderRetry({ order: result.order, tier, status: shown, reason: result.reason }));
   });
@@ -324,49 +362,19 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ ok: true, order: order.id, status: result.status });
   });
 
-  // ---- admin ---------------------------------------------------------------
-
-  function adminAuthorized(c: Context): boolean {
-    c.header('Cache-Control', 'no-store');
-    const token = c.req.query('token') ?? '';
-    return Boolean(config.adminToken) && safeEqual(token, config.adminToken ?? '');
-  }
-
-  const iso = <T extends { created_at: number }>(rows: T[]) => rows.map((r) => ({ ...r, created_at: new Date(r.created_at).toISOString() }));
-
-  app.get('/admin/leads', (c) => {
-    if (!adminAuthorized(c)) return c.json({ error: 'unauthorized' }, 401);
-    const leads = iso(store.listLeads());
-    return c.json({ count: leads.length, leads });
-  });
-
-  app.get('/admin/orders', (c) => {
-    if (!adminAuthorized(c)) return c.json({ error: 'unauthorized' }, 401);
-    const orders = iso(store.listOrders()).map((o) => ({ ...o, updated_at: new Date(o.updated_at).toISOString() }));
-    return c.json({ count: orders.length, orders });
-  });
-
-  app.get('/admin', (c) => {
-    if (!adminAuthorized(c)) return c.html(renderError(401, 'Unauthorized', 'Add ?token=ADMIN_TOKEN to the address.'), 401);
-    return c.html(renderAdmin({ orders: store.listOrders(), leads: store.listLeads(), paymentsEnabled: checkoutOn }));
-  });
+  registerClientRoutes(routeContext);
+  registerAdminRoutes(routeContext);
 
   app.notFound((c) => {
-    if (c.req.path.startsWith('/api/')) return c.json({ error: 'not found' }, 404);
+    if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/admin/api/')) return c.json({ error: 'not found' }, 404);
     return c.html(renderError(404, 'Page not found', 'There is nothing at this address.'), 404);
   });
 
   app.onError((err, c) => {
     console.error('[app] unhandled error:', err);
-    if (c.req.path.startsWith('/api/')) return c.json({ error: 'internal error' }, 500);
+    if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/admin/api/')) return c.json({ error: 'internal error' }, 500);
     return c.html(renderError(500, 'Something went wrong', 'Please try again in a moment.'), 500);
   });
 
   return app;
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
 }

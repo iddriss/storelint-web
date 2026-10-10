@@ -2,6 +2,7 @@ import type { PayLinks } from '../config.js';
 import type { LeadFormValues } from '../leads.js';
 import { PLATFORMS, PLATFORM_LABELS } from '../leads.js';
 import { SITE_NAME, SITE_URL, esc, layout } from './html.js';
+import { findOrderForm } from './order.js';
 
 export interface ShipViewOptions {
   payLinks: PayLinks;
@@ -130,6 +131,13 @@ export function renderShip(o: ShipViewOptions): string {
       }</p>
     </div>
     ${renderTierCards({ payLinks: o.payLinks, paymentsEnabled: o.paymentsEnabled, email: v.email })}
+    <div class="card waitlist" id="find-order">
+      <div class="waitlist-text">
+        <h3>Already paid?</h3>
+        <p>Your order page has the intake form and progress updates. Enter the email you used at checkout and we send the link again.</p>
+      </div>
+      ${findOrderForm({ compact: true })}
+    </div>
   </div>
 </section>
 
@@ -220,7 +228,7 @@ export function renderShip(o: ShipViewOptions): string {
   });
 }
 
-export function renderThanks(o: { name: string; platform: string }): string {
+export function renderThanks(o: { name: string; platform: string; emailEnabled?: boolean }): string {
   const waitlist = o.platform === 'deepscan';
   const body = `<section class="container narrow page-simple">
   <p class="eyebrow">${waitlist ? 'Deep scan' : 'Request received'}</p>
@@ -228,7 +236,7 @@ export function renderThanks(o: { name: string; platform: string }): string {
   <p class="lead">${
     waitlist
       ? 'We will email you once binary deep scans are live. Until then, the free project scan catches most rejections.'
-      : 'We reply within one business day with a confirmed scope and next steps. If you have a StoreLint report link, reply with it.'
+      : `${o.emailEnabled ? 'We just emailed you a confirmation. ' : ''}A developer replies within 24 hours with a confirmed scope and next steps. If you have a StoreLint report link, send it along when we reply.`
   }</p>
   <div class="actions"><a class="btn btn-primary" href="/">Back to ${SITE_NAME}</a> <a class="btn btn-secondary" href="/#scan">Run a scan</a></div>
 </section>`;

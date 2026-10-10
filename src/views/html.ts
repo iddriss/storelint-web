@@ -6,7 +6,7 @@ export const REPO_URL = 'https://github.com/iddriss/storelint';
 export const NPM_URL = 'https://www.npmjs.com/package/@iraaj/storelint';
 export const CLI_VERSION = '0.1.0';
 /** Bump when style.css changes so clients past the 1h static cache pick it up. */
-export const STYLE_VERSION = '4';
+export const STYLE_VERSION = '5';
 
 export function esc(value: unknown): string {
   return String(value ?? '')
@@ -35,6 +35,19 @@ export interface LayoutOptions {
   canonical?: string;
   /** Adds noindex for pages that should not be crawled (reports, thanks). */
   noindex?: boolean;
+  /** Private pages (admin, client order page): tells the browser not to send this URL as a referrer anywhere. */
+  noReferrer?: boolean;
+}
+
+/** UTC timestamp for tables and timelines: `2026-10-10 12:00 UTC`. */
+export function when(ms: number | null | undefined): string {
+  if (!ms) return '';
+  return `${new Date(ms).toISOString().replace('T', ' ').slice(0, 16)} UTC`;
+}
+
+/** Escapes text and keeps its line breaks. */
+export function escLines(value: unknown): string {
+  return esc(value).replace(/\n/g, '<br>');
 }
 
 export function layout(o: LayoutOptions): string {
@@ -53,6 +66,7 @@ export function layout(o: LayoutOptions): string {
 <meta property="og:description" content="${esc(o.description)}">
 ${o.canonical ? `<meta property="og:url" content="${esc(o.canonical)}">\n<link rel="canonical" href="${esc(o.canonical)}">` : ''}
 ${o.noindex ? '<meta name="robots" content="noindex">' : ''}
+${o.noReferrer ? '<meta name="referrer" content="no-referrer">' : ''}
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -84,6 +98,7 @@ ${o.body}
       <a href="${esc(REPO_URL)}" rel="noopener">GitHub</a>
       <a href="${esc(NPM_URL)}" rel="noopener">npm</a>
       <a href="/ship">Ship it for me</a>
+      <a href="/orders/find">Find my order</a>
       <a href="/health">Status</a>
     </nav>
   </div>
