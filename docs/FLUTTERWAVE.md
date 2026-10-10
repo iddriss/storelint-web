@@ -37,7 +37,7 @@ The orchestrator (`POST /orchestration/direct-charges`) needs a specific `paymen
   and it is NGN-only (https://developer.flutterwave.com/v4.0.0/docs/opay).
 
 So under v4 the buttons stay off (`checkout: off (flutterwave v4 configured, …)` in the startup line) until
-`FLW_V4_PAYMENT_METHOD` names a redirect-capable type. Verification, webhooks and the admin pages work regardless. For a
+`FLW_V4_PAYMENT_METHOD` names a redirect-capable type. Verification, webhooks, the admin console and the client order pages work regardless. For a
 USD service page the practical choices are: keep the account on v3 keys (`FLW_API_VERSION=v3` + `FLW_SECRET_KEY`), use
 `PAY_LINK_*` with dashboard payment links, or wait for v4 Checkout and then wire its endpoint into
 `createFlutterwaveV4Client.createPayment` (one function).
@@ -105,6 +105,32 @@ to that), `tx_ref`/`reference` equal to the order id, `currency` equal to the or
 
 `Store.updateOrder` never downgrades a `paid` order, so the return page and webhook can race or replay safely, and a
 paid order short-circuits before any further API call.
+
+### What happens once an order is paid
+
+The first transition to `paid` (whichever of the return page or the webhook gets there first; `updateOrder` reports
+`changed` exactly once) does all of this in one place:
+
+- the order gets its delivery stage (`stage = paid`, `paid_at`) and the first timeline event (`order_events`);
+- the team is emailed (`order_paid`, Reply-To the buyer) with a link to `/admin/orders/<id>`;
+- the buyer is emailed a receipt (`order_receipt`) with the private order page `/o/<order id>/<access token>` and the
+  next step (fill in the intake there). No email goes to a blank or placeholder (`orders+…@`) address; add the real
+  one on the admin order page and use "Resend order link".
+
+A verification that comes back as not paid (`failed`) emails the team only (`payment_failed`, low priority).
+Nothing is emailed for a cancelled checkout or while a payment is `pending`.
+
+`GET /pay/return` for a paid order then redirects (`303`) to the private order page instead of rendering a thank-you
+page. Because `tx_ref` is not a secret (the provider prints it on receipts), the redirect is only given when
+
+- the browser carries the `sl_pay` cookie that `POST /pay/:plan` set for this order (HttpOnly, Secure,
+  SameSite=Lax, `Path=/pay`, 24 h; an HMAC of the order's access token, so it cannot be forged from the order id), or
+- the payment verified within the last 30 minutes (`PAID_RETURN_GRACE_MS`), which covers browsers that drop the
+  cookie on the way back from the provider.
+
+Anyone else who opens `/pay/return?tx_ref=…` for a paid order sees a plain "this order is paid" page without the
+link, and can have it emailed through `/orders/find`. Unpaid, failed, cancelled and pending returns render the same
+retry pages as before.
 
 ### v4 token handling
 
