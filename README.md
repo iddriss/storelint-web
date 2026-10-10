@@ -17,9 +17,9 @@ Server-rendered HTML, one stylesheet, no front-end build step, no external asset
 | `GET /r/:id` | HTML report grouped by severity, score, share link; `404` after 7 days |
 | `GET /ship` | Service page: Play $149, App Store $199, both $299, fix rejections $99, lead form |
 | `POST /ship` | Validates and stores the lead, renders thanks (no email is sent) |
-| `POST /pay/:plan` | Hosted checkout (Flutterwave): creates a pending `orders` row and `303`s to the hosted payment page. Only when `FLW_SECRET_KEY` is set |
+| `POST /pay/:plan` | Hosted checkout (Flutterwave v3 or v4): creates a pending `orders` row and `303`s to the provider's payment page. Only when checkout is enabled (see `FLW_*` below) |
 | `GET /pay/return` | Where Flutterwave sends the buyer back; verifies the transaction server-side, marks the order paid/failed/cancelled, renders the thanks page (with the intake checklist) or a retry page |
-| `POST /webhooks/flutterwave` | `charge.completed` webhook; `401` unless the `verif-hash` header equals `FLW_WEBHOOK_HASH`; re-verifies by id and updates the order idempotently |
+| `POST /webhooks/flutterwave` | `charge.completed` webhook; `401` unless the signature checks out (v3: `verif-hash` equals `FLW_WEBHOOK_HASH`; v4: `flutterwave-signature` is the base64 HMAC-SHA256 of the raw body with `FLW_WEBHOOK_HASH`); re-verifies by id and updates the order idempotently |
 | `GET /health` | `{ "ok": true }` |
 | `GET /admin?token=...` | HTML page listing orders and leads, newest first |
 | `GET /admin/leads?token=...` | Leads as JSON; `401` unless `token` equals `ADMIN_TOKEN` |
@@ -51,15 +51,21 @@ Once the repo is public, `pnpm install` picks it up locally and the Docker build
 | `PAY_LINK_IOS` | unset | Payment link for the App Store package ($199) |
 | `PAY_LINK_BOTH` | unset | Payment link for both stores ($299) |
 | `PAY_LINK_FIX` | unset | Payment link for "fix a rejection" ($99) |
-| `FLW_SECRET_KEY` | unset | Flutterwave secret key (dashboard: Settings -> API keys). Setting it turns on hosted checkout |
-| `FLW_WEBHOOK_HASH` | unset | The "secret hash" you type into Settings -> Webhooks; Flutterwave sends it back as the `verif-hash` header. Unset means `/webhooks/flutterwave` always returns 401 |
+| `FLW_API_VERSION` | auto | `v3` or `v4`. Unset: `v4` when `FLW_CLIENT_ID` is set, otherwise `v3` |
+| `FLW_SECRET_KEY` | unset | v3 secret key (Settings -> API keys). Setting it turns on hosted checkout under v3. Under v4 it doubles as the client secret when `FLW_CLIENT_SECRET` is unset |
+| `FLW_CLIENT_ID` | unset | v4 Client ID (`FLWPUBK-...-X`; Settings -> API keys -> V4 tab). Setting it selects v4 |
+| `FLW_CLIENT_SECRET` | unset | v4 Client Secret (same tab) |
+| `FLW_V4_PAYMENT_METHOD` | unset | v4 only: `payment_method.type` for the orchestrator charge (e.g. `opay`). v4 has no hosted checkout yet, so the price-card buttons stay off until this is set; see `docs/FLUTTERWAVE.md` |
+| `FLW_TOKEN_URL` | `https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token` | v4 OAuth token endpoint; override only for local checks |
+| `FLW_WEBHOOK_HASH` | unset | The "secret hash" you type into Settings -> Webhooks. v3 sends it back as `verif-hash`; v4 uses it as the HMAC key for `flutterwave-signature`. Unset means `/webhooks/flutterwave` always returns 401 |
 | `FLW_CURRENCY` | `USD` | Currency the hosted page charges in. Prices are USD; only change this if the Flutterwave account cannot collect USD |
-| `FLW_API_BASE` | `https://api.flutterwave.com/v3` | API base; override only for local checks |
+| `FLW_API_BASE` | per version | API base: v3 `https://api.flutterwave.com/v3`, v4 `https://f4bexperience.flutterwave.com` (sandbox: `https://developersandbox-api.flutterwave.com`). Override for sandbox or local checks |
 | `PUBLIC_URL` | `https://storelint.embracetech.org` | Public origin used to build `redirect_url` (`${PUBLIC_URL}/pay/return`) |
 
 Price-card buttons, in order of precedence: a `PAY_LINK_*` for that plan (external link) wins; otherwise, when
-`FLW_SECRET_KEY` is set, the card is a small form (email + honeypot) that posts to `/pay/:plan`; otherwise the button
-scrolls to the lead form with that package pre-selected. Payment flow, dashboard setup and the verification rules
+hosted checkout is enabled (v3: `FLW_SECRET_KEY`; v4: `FLW_CLIENT_ID` + secret + `FLW_V4_PAYMENT_METHOD`), the card is a
+small form (email + honeypot) that posts to `/pay/:plan`; otherwise the button scrolls to the lead form with that
+package pre-selected. Payment flow, dashboard setup and the verification rules
 are in [`docs/FLUTTERWAVE.md`](docs/FLUTTERWAVE.md).
 
 ## Run locally
@@ -92,7 +98,7 @@ src/
   app.ts           Hono routes
   config.ts        env parsing
   db.ts            reports + leads + orders tables (better-sqlite3)
-  flutterwave.ts   Flutterwave v3 client (fetch) + the paid/not-paid decision
+  flutterwave.ts   Flutterwave provider interface, v3 + v4 clients (fetch, OAuth token cache) + the paid/not-paid decision
   scanner.ts       storelint adapter with stub fallback + report normalisation
   scan-service.ts  upload -> temp dir -> extract -> scan -> store -> cleanup
   zip.ts           safe zip extraction (yauzl)

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config } from './config.js';
 import type { OrderRow, OrderStatus } from './db.js';
 import type { Store } from './db.js';
-import type { FlutterwaveClient, VerifiedTransaction } from './flutterwave.js';
+import type { FlutterwaveClient, VerifiedTransaction, WebhookEvent } from './flutterwave.js';
 import { FlutterwaveError, createFlutterwaveClient, judgePayment } from './flutterwave.js';
 import { validateLead } from './leads.js';
 import type { RateLimiter } from './ratelimit.js';
@@ -53,12 +53,10 @@ export function createApp(deps: AppDeps): Hono {
   const now = deps.now ?? Date.now;
   const limiter = deps.limiter ?? createRateLimiter({ ...config.rateLimit, now });
   const flw: FlutterwaveClient | undefined =
-    deps.flutterwave ??
-    (config.flutterwave.secretKey
-      ? createFlutterwaveClient({ secretKey: config.flutterwave.secretKey, apiBase: config.flutterwave.apiBase, fetch: deps.fetch })
-      : undefined);
+    deps.flutterwave ?? (config.flutterwave.configured ? createFlutterwaveClient({ ...config.flutterwave, fetch: deps.fetch, now }) : undefined);
+  const checkoutOn = Boolean(flw) && config.paymentsEnabled;
   const app = new Hono();
-  const cardOpts = { payLinks: config.payLinks, paymentsEnabled: config.paymentsEnabled };
+  const cardOpts = { payLinks: config.payLinks, paymentsEnabled: checkoutOn };
 
   // ---- helpers -------------------------------------------------------------
 
@@ -227,7 +225,8 @@ export function createApp(deps: AppDeps): Hono {
       return { order, status: order.status, reason: 'the payment could not be verified yet' };
     }
     const verdict = judgePayment(order, verified);
-    const status: OrderStatus = verdict.paid ? 'paid' : String(verified.status).toLowerCase() === 'cancelled' ? 'cancelled' : 'failed';
+    const providerStatus = String(verified.status).toLowerCase();
+    const status: OrderStatus = verdict.paid ? 'paid' : providerStatus === 'cancelled' ? 'cancelled' : providerStatus === 'pending' ? 'pending' : 'failed';
     const customerEmail = verified.customer?.email;
     const { row, changed } = store.updateOrder(order.id, {
       status,
@@ -242,7 +241,7 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/pay/:plan', rateLimited(false, 'pay'), async (c) => {
     const tier: Tier | undefined = findTier(c.req.param('plan'));
     if (!tier) return c.html(renderError(404, 'Unknown package', 'Pick one of the packages on the pricing page.'), 404);
-    if (!flw) return c.html(renderError(404, 'Checkout not available', 'Online payment is not enabled on this server. Use the request form instead.'), 404);
+    if (!flw || !checkoutOn) return c.html(renderError(404, 'Checkout not available', 'Online payment is not enabled on this server. Use the request form instead.'), 404);
     let body: Record<string, unknown> = {};
     try {
       body = (await c.req.parseBody()) as Record<string, unknown>;
@@ -255,7 +254,7 @@ export function createApp(deps: AppDeps): Hono {
 
     const order = store.insertOrder({ plan: tier.key, amount_cents: tier.amountCents, currency: config.flutterwave.currency, email, ip: clientIp(c) });
     try {
-      const link = await flw.createPayment({
+      const { link, providerId } = await flw.createPayment({
         tx_ref: order.tx_ref,
         amount: order.amount_cents / 100,
         currency: order.currency,
@@ -264,7 +263,8 @@ export function createApp(deps: AppDeps): Hono {
         customizations: { title: 'StoreLint release ops', description: `${tier.name} (${tier.price})` },
         meta: { order_id: order.id, plan: tier.key },
       });
-      console.log(`[pay] order ${order.id} (${tier.key}, ${order.currency} ${order.amount_cents / 100}) -> hosted checkout`);
+      if (providerId) store.updateOrder(order.id, { status: 'pending', flw_id: providerId });
+      console.log(`[pay] order ${order.id} (${tier.key}, ${order.currency} ${order.amount_cents / 100}) -> hosted checkout (${flw.version}${providerId ? ` ${providerId}` : ''})`);
       c.header('Cache-Control', 'no-store');
       return c.redirect(link, 303);
     } catch (err) {
@@ -279,12 +279,14 @@ export function createApp(deps: AppDeps): Hono {
     c.header('Cache-Control', 'no-store');
     const txRef = c.req.query('tx_ref') ?? '';
     const qStatus = (c.req.query('status') ?? '').toLowerCase();
-    const transactionId = c.req.query('transaction_id') ?? '';
     const order = /^sl_[0-9a-f]{16}$/.test(txRef) ? store.getOrderByTxRef(txRef) : undefined;
     if (!order) return c.html(renderError(404, 'Order not found', 'We could not match this payment to an order. If you were charged, reply to the Flutterwave receipt.'), 404);
     const tier = findTier(order.plan);
 
     if (order.status === 'paid') return c.html(renderPaid({ order, tier }));
+
+    // v3 appends transaction_id; v4 does not document what it appends, so fall back to the charge id we stored at creation.
+    const transactionId = c.req.query('transaction_id') || order.flw_id || '';
 
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(transactionId)) {
       // Cancelled or failed before a transaction existed: nothing to verify.
@@ -303,23 +305,19 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/pay/:plan', (c) => c.redirect(`/ship?plan=${encodeURIComponent(c.req.param('plan'))}#prices`, 303));
 
   app.post('/webhooks/flutterwave', async (c) => {
-    const hash = c.req.header('verif-hash') ?? '';
-    if (!config.flutterwave.webhookHash || !hash || !safeEqual(hash, config.flutterwave.webhookHash)) {
-      return c.json({ error: 'unauthorized' }, 401);
-    }
-    let payload: { event?: unknown; data?: { id?: unknown; tx_ref?: unknown; status?: unknown } };
+    const rawBody = await c.req.text();
+    if (!flw || !flw.verifyWebhook((name) => c.req.header(name), rawBody)) return c.json({ error: 'unauthorized' }, 401);
+    let evt: WebhookEvent;
     try {
-      payload = (await c.req.json()) as typeof payload;
+      evt = flw.parseWebhook(rawBody);
     } catch {
       return c.json({ error: 'invalid json' }, 400);
     }
-    if (payload.event !== 'charge.completed') return c.json({ ok: true, ignored: String(payload.event ?? '') });
-    const txRef = typeof payload.data?.tx_ref === 'string' ? payload.data.tx_ref : '';
-    const id = payload.data?.id;
-    const transactionId = typeof id === 'number' || typeof id === 'string' ? String(id) : '';
-    const order = txRef ? store.getOrderByTxRef(txRef) : undefined;
+    if (evt.event !== 'charge.completed') return c.json({ ok: true, ignored: evt.event });
+    const order = evt.reference ? store.getOrderByTxRef(evt.reference) : undefined;
+    const transactionId = evt.transactionId;
     if (!order || !transactionId) {
-      console.warn(`[pay:webhook] charge.completed for unknown order tx_ref=${txRef} id=${transactionId}`);
+      console.warn(`[pay:webhook] charge.completed for unknown order tx_ref=${evt.reference} id=${transactionId}`);
       return c.json({ ok: true, ignored: 'unknown order' });
     }
     const result = await settleOrder(order, transactionId, 'webhook');
@@ -350,7 +348,7 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get('/admin', (c) => {
     if (!adminAuthorized(c)) return c.html(renderError(401, 'Unauthorized', 'Add ?token=ADMIN_TOKEN to the address.'), 401);
-    return c.html(renderAdmin({ orders: store.listOrders(), leads: store.listLeads(), paymentsEnabled: config.paymentsEnabled }));
+    return c.html(renderAdmin({ orders: store.listOrders(), leads: store.listLeads(), paymentsEnabled: checkoutOn }));
   });
 
   app.notFound((c) => {

@@ -29,7 +29,11 @@ const app = createApp({ store, config, scanner });
 const server = serve({ fetch: app.fetch, port: config.port, hostname: '0.0.0.0' }, (info) => {
   console.log(
     `storelint-web listening on http://${info.address}:${info.port} (scanner: ${scanner.source}, data: ${config.dataDir}, reports stored: ${store.countReports()}, checkout: ${
-      config.paymentsEnabled ? `flutterwave ${config.flutterwave.currency}${config.flutterwave.webhookHash ? '' : ', no webhook hash'}` : 'off'
+      config.paymentsEnabled
+        ? `flutterwave ${config.flutterwave.version} ${config.flutterwave.currency}${config.flutterwave.webhookHash ? '' : ', no webhook hash'}`
+        : config.flutterwave.configured
+          ? `off (flutterwave ${config.flutterwave.version} configured, set FLW_V4_PAYMENT_METHOD to enable checkout)`
+          : 'off'
     })`,
   );
 });
