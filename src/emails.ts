@@ -131,7 +131,7 @@ export function leadInternal(ctx: EmailContext, lead: LeadRow): EmailContent {
       { rows: [['Name', lead.name], ['Email', lead.email], ['Package', pkg], ['Repository', lead.repo_url], ['Store links', lead.store_links]] },
       ...(lead.message ? [{ quote: lead.message }] : []),
       { button: { label: 'Open the lead', url: adminLeadUrl(ctx, lead.id) } },
-      { small: 'The lead was told a developer replies within 24 hours. Replying to this email goes to them.' },
+      { small: 'The lead was told a developer replies within one business day. Replying to this email goes to them.' },
     ],
     footer: internalFooter(ctx),
   });
@@ -211,7 +211,7 @@ export function leadAck(ctx: EmailContext, lead: LeadRow): EmailContent {
     subject: 'We received your request',
     heading: `Thanks${first}, we received your request.`,
     blocks: [
-      { p: 'A developer replies within 24 hours with a confirmed scope and the next steps. Nothing is charged until you decide to go ahead.' },
+      { p: 'A developer replies within one business day with a confirmed scope and the next steps. Nothing is charged until you decide to go ahead.' },
       { rows: [['Package', pkg], ['Repository', lead.repo_url]] },
       { p: 'If you have a StoreLint report link or the rejection message from the store, reply to this email with it. Please do not send passwords or keys by email.' },
     ],

@@ -116,6 +116,16 @@ describe('admin login', () => {
     assert.equal((await h.app.request('/admin/orders/sl_0000000000000000')).status, 303, 'pages still need a session');
   });
 
+  it('cannot dodge the sign-in limit by forging X-Forwarded-For behind Cloudflare', async () => {
+    const h = harness();
+    for (let i = 0; i < 5; i++) {
+      const spoofed = { 'cf-connecting-ip': '203.0.113.60', 'x-forwarded-for': `10.9.8.${i}, 203.0.113.60` };
+      assert.equal((await h.app.request('/admin/login', form({ password: 'guess' }, spoofed))).status, 401);
+    }
+    const next = { 'cf-connecting-ip': '203.0.113.60', 'x-forwarded-for': '10.9.8.99, 203.0.113.60' };
+    assert.equal((await h.app.request('/admin/login', form({ password: ADMIN_PASSWORD }, next))).status, 429);
+  });
+
   it('rate limits sign-in to 5 failed attempts per 15 minutes per IP', async () => {
     const h = harness();
     const ip = { 'x-forwarded-for': '203.0.113.50, 10.0.0.1' };

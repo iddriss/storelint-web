@@ -29,8 +29,14 @@ export interface RouteContext {
   };
 }
 
-/** First X-Forwarded-For entry (Cloudflare -> Traefik -> us), else the socket address. */
+/**
+ * The visitor's address. Cloudflare sets CF-Connecting-IP itself and overwrites anything the client
+ * sent, so it cannot be forged through the tunnel; X-Forwarded-For's first entry can be (the client
+ * may send its own and Cloudflare appends). Prefer the former, fall back for non-Cloudflare setups.
+ */
 export function clientIp(c: Context): string {
+  const cf = c.req.header('cf-connecting-ip')?.trim();
+  if (cf) return cf;
   const xff = c.req.header('x-forwarded-for');
   if (xff) {
     const first = xff.split(',')[0]?.trim();

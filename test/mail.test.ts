@@ -181,7 +181,7 @@ describe('notifications', () => {
     assert.match(team!.html, /Flutter app &lt;b&gt;urgent&lt;\/b&gt;/, 'HTML bodies escape what people typed');
     assert.doesNotMatch(team!.html, /<img|<script|<link|url\(/i, 'no remote assets');
     assert.match(ack!.subject, /We received your request/);
-    assert.match(ack!.text, /A developer replies within 24 hours/);
+    assert.match(ack!.text, /A developer replies within one business day/);
     assert.equal(h.emails()[0]?.related_type, 'lead');
     assert.equal(h.emails()[0]?.related_id, '1');
   });

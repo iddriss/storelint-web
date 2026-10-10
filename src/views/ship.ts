@@ -236,7 +236,7 @@ export function renderThanks(o: { name: string; platform: string; emailEnabled?:
   <p class="lead">${
     waitlist
       ? 'We will email you once binary deep scans are live. Until then, the free project scan catches most rejections.'
-      : `${o.emailEnabled ? 'We just emailed you a confirmation. ' : ''}A developer replies within 24 hours with a confirmed scope and next steps. If you have a StoreLint report link, send it along when we reply.`
+      : `${o.emailEnabled ? 'We just emailed you a confirmation. ' : ''}A developer replies within one business day with a confirmed scope and next steps. If you have a StoreLint report link, send it along when we reply.`
   }</p>
   <div class="actions"><a class="btn btn-primary" href="/">Back to ${SITE_NAME}</a> <a class="btn btn-secondary" href="/#scan">Run a scan</a></div>
 </section>`;
