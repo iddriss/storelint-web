@@ -31,10 +31,34 @@ export interface FlutterwaveConfig {
   configured: boolean;
 }
 
+export interface SmtpConfig {
+  host: string | undefined;
+  port: number;
+  user: string | undefined;
+  pass: string | undefined;
+  /** Envelope/From address (`SMTP_FROM`, default `SMTP_USER`). */
+  from: string | undefined;
+  fromName: string;
+  /** Implicit TLS (port 465). */
+  secure: boolean;
+  /** STARTTLS is mandatory on every other port except 25. */
+  requireTLS: boolean;
+  /** True when mail can actually be sent: a host and a From address, and a password whenever a user is given. */
+  configured: boolean;
+}
+
 export interface Config {
   port: number;
   dataDir: string;
+  /** Bearer token for the JSON automation API (`/admin/api/*`). Never accepted as a query parameter. */
   adminToken: string | undefined;
+  /** `scrypt:N:r:p:<salt>:<hash>` (see `pnpm hash-password`). Preferred over `adminPassword`. */
+  adminPasswordHash: string | undefined;
+  /** Plain-text fallback for the admin login. */
+  adminPassword: string | undefined;
+  smtp: SmtpConfig;
+  /** Where internal notifications go, and the address clients are told to invite. */
+  notifyEmail: string;
   payLinks: PayLinks;
   /** Public origin used for redirect_url (no trailing slash). */
   publicUrl: string;
@@ -54,6 +78,41 @@ export interface Config {
 function nonEmpty(v: string | undefined): string | undefined {
   const t = v?.trim();
   return t ? t : undefined;
+}
+
+/** Like `nonEmpty`, but a value that still holds an unresolved template (`{{ ... }}`) counts as unset. */
+function resolved(v: string | undefined): string | undefined {
+  const t = nonEmpty(v);
+  return t && !t.includes('{{') ? t : undefined;
+}
+
+export const DEFAULT_NOTIFY_EMAIL = 'developers@embracetech.org';
+
+export function loadSmtpConfig(env: NodeJS.ProcessEnv): SmtpConfig {
+  const host = resolved(env.SMTP_HOST);
+  const parsedPort = Number.parseInt(resolved(env.SMTP_PORT) ?? '', 10);
+  const port = Number.isFinite(parsedPort) && parsedPort > 0 && parsedPort < 65536 ? parsedPort : 587;
+  const user = resolved(env.SMTP_USER);
+  const pass = resolved(env.SMTP_PASS);
+  const from = resolved(env.SMTP_FROM) ?? user;
+  const secure = port === 465;
+  return {
+    host,
+    port,
+    user,
+    pass,
+    from,
+    fromName: resolved(env.SMTP_FROM_NAME) ?? 'StoreLint',
+    secure,
+    requireTLS: !secure && port !== 25,
+    configured: Boolean(host && from && from.includes('@') && (!user || pass)),
+  };
+}
+
+/** One startup line about the mail setup. Never includes a value that could be a secret. */
+export function describeSmtp(smtp: SmtpConfig): string {
+  const yn = (v: unknown) => (v ? 'yes' : 'no');
+  return `[smtp] ${smtp.configured ? 'configured' : 'not configured (outgoing mail is recorded as skipped)'}: host=${smtp.host ?? '(unset)'} port=${smtp.port} secure=${yn(smtp.secure)} user=${yn(smtp.user)} pass=${yn(smtp.pass)} from=${yn(smtp.from)}`;
 }
 
 export const DEFAULT_PUBLIC_URL = 'https://storelint.embracetech.org';
@@ -82,6 +141,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: Number.isFinite(port) && port > 0 ? port : 3000,
     dataDir: nonEmpty(env.DATA_DIR) ?? '/data',
     adminToken: nonEmpty(env.ADMIN_TOKEN),
+    adminPasswordHash: nonEmpty(env.ADMIN_PASSWORD_HASH),
+    adminPassword: nonEmpty(env.ADMIN_PASSWORD),
+    smtp: loadSmtpConfig(env),
+    notifyEmail: resolved(env.NOTIFY_EMAIL) ?? DEFAULT_NOTIFY_EMAIL,
     payLinks: {
       play: nonEmpty(env.PAY_LINK_PLAY),
       ios: nonEmpty(env.PAY_LINK_IOS),

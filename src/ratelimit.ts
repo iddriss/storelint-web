@@ -1,6 +1,8 @@
 export interface RateLimiter {
   /** Records a hit for `key` and reports whether it is still within the limit. */
   hit(key: string): { allowed: boolean; remaining: number; retryAfterSec: number };
+  /** Like `hit` but records nothing: reports whether another hit would be allowed right now. */
+  check(key: string): { allowed: boolean; remaining: number; retryAfterSec: number };
   reset(): void;
 }
 
@@ -42,6 +44,15 @@ export function createRateLimiter(opts: RateLimiterOptions): RateLimiter {
       }
       fresh.push(t);
       hits.set(key, fresh);
+      return { allowed: true, remaining: opts.limit - fresh.length, retryAfterSec: 0 };
+    },
+    check(key) {
+      const t = now();
+      const fresh = (hits.get(key) ?? []).filter((s) => t - s < opts.windowMs);
+      if (fresh.length >= opts.limit) {
+        const oldest = fresh[0] ?? t;
+        return { allowed: false, remaining: 0, retryAfterSec: Math.max(1, Math.ceil((oldest + opts.windowMs - t) / 1000)) };
+      }
       return { allowed: true, remaining: opts.limit - fresh.length, retryAfterSec: 0 };
     },
     reset() {

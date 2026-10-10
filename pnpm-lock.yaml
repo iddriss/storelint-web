@@ -17,6 +17,9 @@ importers:
       hono:
         specifier: ^4.13.13
         version: 4.13.13
+      nodemailer:
+        specifier: ^10.1.0
+        version: 10.1.0
       yauzl:
         specifier: ^3.4.0
         version: 3.4.0
@@ -33,6 +36,10 @@ importers:
       typescript:
         specifier: ^5.9.0
         version: 5.9.3
+    optionalDependencies:
+      storelint:
+        specifier: github:iddriss/storelint
+        version: '@iraaj/storelint@https://codeload.github.com/iddriss/storelint/tar.gz/3ac9919f7fb0fed1d829a5de2f76dd165631f0ef'
 
 packages:
 
@@ -41,6 +48,12 @@ packages:
     engines: {node: '>=20'}
     peerDependencies:
       hono: ^4 || ^5.0.0-0
+
+  '@iraaj/storelint@https://codeload.github.com/iddriss/storelint/tar.gz/3ac9919f7fb0fed1d829a5de2f76dd165631f0ef':
+    resolution: {tarball: https://codeload.github.com/iddriss/storelint/tar.gz/3ac9919f7fb0fed1d829a5de2f76dd165631f0ef}
+    version: 0.1.0
+    engines: {node: '>=18'}
+    hasBin: true
 
   '@types/better-sqlite3@9.6.0':
     resolution: {integrity: sha512-ZEEwBSgMu7GYJOynoagg5X9JbxfL6dTJDsgViJIqh67jV44kyOr9RXfmFjLK5rzC4MWssP06t9hu/JwGDnUbCg==}
@@ -63,6 +76,10 @@ packages:
     resolution: {integrity: sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==}
     engines: {node: ^18 || ^20 || >= 21}
 
+  nodemailer@10.1.0:
+    resolution: {integrity: sha512-fXW8AulB25aOTuwfRYV6lqHyfz2VM4rr4SGXH03mE7x5znEUpzL5mu6anARUpZN7744Ziwkmr4AxSLPJsBQspg==}
+    engines: {node: '>=20.0.0'}
+
   pend@1.2.0:
     resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
 
@@ -84,6 +101,9 @@ snapshots:
     dependencies:
       hono: 4.13.13
 
+  '@iraaj/storelint@https://codeload.github.com/iddriss/storelint/tar.gz/3ac9919f7fb0fed1d829a5de2f76dd165631f0ef':
+    optional: true
+
   '@types/better-sqlite3@9.6.0':
     dependencies:
       '@types/node': 22.20.5
@@ -103,6 +123,8 @@ snapshots:
   hono@4.13.13: {}
 
   node-addon-api@8.9.2: {}
+
+  nodemailer@10.1.0: {}
 
   pend@1.2.0: {}
 
